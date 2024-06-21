@@ -81,11 +81,6 @@ Contributions are welcome! Please fork the repository and submit a pull request 
 
 For any questions or suggestions, please open an issue on the GitHub repository.
 
-```
-
-Additionally, here's the `LICENSE` file content for Apache 2.0:
-
-```markdown
                                  Apache License
                            Version 2.0, January 2004
                         http://www.apache.org/licenses/
