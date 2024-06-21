@@ -4,11 +4,13 @@
 VERBOSE=false
 DEBUG=false
 LOGFILE="dns_management.log"
-LOCKFILE="/var/run/manage-dns.lock"
-BACKUP_DIR="/mnt/volume_nyc3_02/backups"
+LOCKFILE="./manage-dns.lock"
+BACKUP_DIR="./backups"
 CORE_FILE="/etc/coredns/Corefile"
 TIMEOUT=30
-USE_SUDO=false
+USE_SUDO=""
+NO_BACKUP=false
+NO_RESTART=false
 
 # Functions
 log() {
@@ -32,10 +34,17 @@ usage() {
     echo "  list [--type TYPE]"
     echo "  list-all"
     echo "  remove --type TYPE --name NAME [--timeout SECONDS]"
+    echo "  update-forward --forward FORWARD"
     echo "Options:"
     echo "  --verbose                 Enable verbose mode"
     echo "  --debug                   Enable debug mode"
     echo "  --sudo                    Use sudo for file operations"
+    echo "  --corefile PATH           Path to the Corefile"
+    echo "  --logfile PATH            Path to the log file"
+    echo "  --lockfile PATH           Path to the lockfile"
+    echo "  --backups PATH            Path to the backups directory"
+    echo "  --nobackup                Enable no backup creation"
+    echo "  --norestart               Prevent restarting CoreDNS"
     echo "Examples:"
     echo "  $0 --domain domain.com --action create --type A --name www --value 10.10.10.10"
     echo "  $0 --domain domain.com --action new --type CNAME --name git --value github.com"
@@ -45,6 +54,7 @@ usage() {
     echo "  $0 --domain domain.com --action list --type A"
     echo "  $0 --domain domain.com --action list-all"
     echo "  $0 --domain domain.com --action remove --type A --name www"
+    echo "  $0 --domain all --action update-forward --forward \"192.168.128.1 10.0.0.1\""
     exit 1
 }
 
@@ -54,7 +64,17 @@ pad() {
     printf "%-${length}s" "$str"
 }
 
+repeat() {
+  local char=$1
+  local count=$2
+  printf "%${count}s" | tr ' ' "$char"
+}
+
 backup_corefile() {
+    if $NO_BACKUP; then
+        log "No backup created."
+        return
+    fi
     local timestamp=$(date -u +"%Y_%m_%d_%H_%M_%S")
     local backup_file="${BACKUP_DIR}/Corefile_${timestamp}.bak"
     if $USE_SUDO cp "$CORE_FILE" "$backup_file"; then
@@ -80,6 +100,10 @@ remove_lockfile() {
 }
 
 restart_coredns() {
+    if $NO_RESTART; then
+        log "Not restarting CoreDNS service"
+        return
+    fi
     log "Restarting CoreDNS service"
     if $USE_SUDO systemctl restart coredns.service; then
         log "CoreDNS service restarted successfully"
@@ -126,14 +150,25 @@ while [[ "$1" != "" ]]; do
         --type) shift; TYPE=$1 ;;
         --name) shift; NAME=$1 ;;
         --value) shift; VALUE=$1 ;;
+        --forward) shift; VALUE=$1 ;;
         --verbose) VERBOSE=true ;;
         --debug) DEBUG=true ;;
         --timeout) shift; TIMEOUT=$1 ;;
         --sudo) USE_SUDO="sudo" ;;
+        --corefile) shift; CORE_FILE=$1 ;;
+        --lockfile) shift; LOCKFILE=$1 ;;
+        --logfile) shift; LOGFILE=$1 ;;
+        --backups) shift; BACKUP_DIR=$1 ;;
+        --nobackup) NO_BACKUP=true ;;
+        --norestart) NO_RESTART=true ;;
         *) usage ;;
     esac
     shift
 done
+
+if ! $NO_BACKUP; then
+    $USE_SUDO mkdir -p "${BACKUP_DIR}"
+fi
 
 # Debug information
 if [ "$DEBUG" = true ]; then
@@ -202,8 +237,12 @@ manage_dns() {
             # Add the new DNS entry
             if grep -q "$DOMAIN {" "$CORE_FILE"; then
                 # Domain exists, add new record
-                $USE_SUDO sed -i "/$DOMAIN {/,/}/ s/}/    $TYPE $NAME $VALUE\n}/" "$CORE_FILE"
-                log "Successfully added $TYPE record $NAME pointing to $VALUE in domain $DOMAIN"
+                if grep -q "$DOMAIN {/,/}/ s/    $TYPE $NAME $VALUE" "$CORE_FILE"; then
+                    log "Record already exists, skipping add"
+                else
+                    $USE_SUDO sed -i "/$DOMAIN {/,/}/ s/}/    $TYPE $NAME $VALUE\n}/" "$CORE_FILE"
+                    log "Successfully added $TYPE record $NAME pointing to $VALUE in domain $DOMAIN"
+                fi
             else
                 # Domain does not exist, log error
                 error_log "Domain $DOMAIN does not exist in Corefile"
@@ -221,7 +260,7 @@ manage_dns() {
                 else
                     error_log "Record $NAME does not exist in domain $DOMAIN"
                     exit 1
-                }
+                fi
             else
                 # Domain does not exist, log error
                 error_log "Domain $DOMAIN does not exist in Corefile"
@@ -256,7 +295,7 @@ manage_dns() {
                 done
                 echo "DOMAIN: $DOMAIN"
                 echo "| $(pad "Type" $max_type_len) | $(pad "Name" $max_name_len) | $(pad "Value" $max_value_len) |"
-                echo "|$(pad "-" $max_type_len)--$(pad "-" $max_name_len)--$(pad "-" $max_value_len)|"
+                echo "| $(repeat "-" $max_type_len) | $(repeat "-" $max_name_len) | $(repeat "-" $max_value_len) |"
                 for i in "${!types[@]}"; do
                     echo "| $(pad "${types[i]}" $max_type_len) | $(pad "${names[i]}" $max_name_len) | $(pad "${values[i]}" $max_value_len) |"
                 done
@@ -290,7 +329,7 @@ manage_dns() {
                     done
                     echo "DOMAIN: $domain"
                     echo "| $(pad "Type" $max_type_len) | $(pad "Name" $max_name_len) | $(pad "Value" $max_value_len) |"
-                    echo "|$(pad "-" $max_type_len)--$(pad "-" $max_name_len)--$(pad "-" $max_value_len)|"
+                    echo "| $(repeat "-" $max_type_len) | $(repeat "-" $max_name_len) | $(repeat "-" $max_value_len) |"
                     for i in "${!types[@]}"; do
                         echo "| $(pad "${types[i]}" $max_type_len) | $(pad "${names[i]}" $max_name_len) | $(pad "${values[i]}" $max_value_len) |"
                     done
@@ -317,6 +356,21 @@ manage_dns() {
                 exit 0
             fi
             ;;
+        update-forward)
+            log "Updating forwarders for $DOMAIN to $VALUE"
+            if [ "$DOMAIN" = "all" ]; then
+                $USE_SUDO sed -i "/forward .*/c\    forward . $VALUE" "$CORE_FILE"
+                log "Successfully updated forwarders for all domains to $VALUE"
+            else
+                if grep -q "$DOMAIN {" "$CORE_FILE"; then
+                    $USE_SUDO sed -i "/$DOMAIN {/,/}/ s/    forward .*/    forward . $VALUE/" "$CORE_FILE"
+                    log "Successfully updated forwarders for $DOMAIN to $VALUE"
+                else
+                    error_log "Domain $DOMAIN does not exist in Corefile"
+                    exit 1
+                fi
+            fi
+            ;;
         *)
             usage
             ;;
@@ -338,4 +392,3 @@ remove_lockfile
 
 # Remove trap
 trap - INT TERM EXIT
-
