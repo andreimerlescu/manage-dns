@@ -11,6 +11,7 @@ TIMEOUT=30
 USE_SUDO=""
 BACKUP=false
 RESTART=false
+OUTPUT_JSON=false
 
 # Functions
 log() {
@@ -25,7 +26,7 @@ error_log() {
 }
 
 usage() {
-    echo "Usage: $0 --domain DOMAIN --action [actions] [options]"
+    echo "Usage: $0 --domain DOMAIN --action ACTION [options]"
     echo "Actions:"
     echo "  create --type TYPE --name NAME --value VALUE"
     echo "  new --type TYPE --name NAME --value VALUE"
@@ -42,17 +43,18 @@ usage() {
     echo "  --corefile PATH           Path to the Corefile"
     echo "  --logfile PATH            Path to the log file"
     echo "  --lockfile PATH           Path to the lockfile"
-    echo "  --backup                  Enable backup of Corefile"
     echo "  --backups PATH            Path to the backups directory"
-    echo "  --restart                 Prevent restarting CoreDNS"
+    echo "  --backup                  Enable backup creation"
+    echo "  --restart                 Enable restart of CoreDNS"
+    echo "  --json                    Output in JSON format"
     echo "Examples:"
-    echo "  $0 --action list-all"
-    echo "  $0 --domain domain.com --action list"
-    echo "  $0 --domain domain.com --action list --type A"
     echo "  $0 --domain domain.com --action create --type A --name www --value 10.10.10.10"
     echo "  $0 --domain domain.com --action new --type CNAME --name git --value github.com"
     echo "  $0 --domain domain.com --action add --type A --name www --value 10.10.10.11"
     echo "  $0 --domain domain.com --action replace --type A --name www --value 10.10.10.12"
+    echo "  $0 --domain domain.com --action list"
+    echo "  $0 --domain domain.com --action list --type A"
+    echo "  $0 --domain domain.com --action list-all"
     echo "  $0 --domain domain.com --action remove --type A --name www"
     echo "  $0 --domain all --action update-forward --forward \"192.168.128.1 10.0.0.1\""
     exit 1
@@ -161,6 +163,7 @@ while [[ "$1" != "" ]]; do
         --backups) shift; BACKUP_DIR=$1 ;;
         --backup) BACKUP=true ;;
         --restart) RESTART=true ;;
+        --json) OUTPUT_JSON=true ;;
         *) usage ;;
     esac
     shift
@@ -176,7 +179,7 @@ if [ "$DEBUG" = true ]; then
 fi
 
 # Ensure the domain and IP are valid if needed
-if [[ "${DOMAIN}" != "all" ]] && ! validate_domain "$DOMAIN"; then
+if [[ "$DOMAIN" != "all" ]] && ! validate_domain "$DOMAIN"; then
     error_log "Invalid domain: $DOMAIN"
     exit 1
 fi
@@ -285,40 +288,14 @@ manage_dns() {
                     names+=("$(echo "$line" | awk '{print $2}')")
                     values+=("$(echo "$line" | awk '{print $3}')")
                 done <<< "$records"
-                local max_type_len=4
-                local max_name_len=4
-                local max_value_len=5
-                for i in "${!types[@]}"; do
-                    [ ${#types[i]} -gt $max_type_len ] && max_type_len=${#types[i]}
-                    [ ${#names[i]} -gt $max_name_len ] && max_name_len=${#names[i]}
-                    [ ${#values[i]} -gt $max_value_len ] && max_value_len=${#values[i]}
-                done
-                echo "DOMAIN: $DOMAIN"
-                echo "| $(pad "Type" $max_type_len) | $(pad "Name" $max_name_len) | $(pad "Value" $max_value_len) |"
-                echo "| $(repeat "-" $max_type_len) | $(repeat "-" $max_name_len) | $(repeat "-" $max_value_len) |"
-                for i in "${!types[@]}"; do
-                    echo "| $(pad "${types[i]}" $max_type_len) | $(pad "${names[i]}" $max_name_len) | $(pad "${values[i]}" $max_value_len) |"
-                done
-            fi
-            ;;
-        list-all)
-            log "Listing all domains"
-            local domains
-            domains=$(grep -oP '^[a-zA-Z0-9.-]+ {' "$CORE_FILE" | awk '{print $1}')
-            for domain in $domains; do
-                local records
-                records=$(grep -A 100 "$domain {" "$CORE_FILE" | awk '/}/ {exit} {print}' | grep -E "^\s+[A-Z]+")
-                if [ -z "$records" ]; then
-                    continue
+                if $OUTPUT_JSON; then
+                    echo "{\"domain\": \"$DOMAIN\", \"records\": {"
+                    echo "\"$(echo ${types[@]} | tr '[:upper:]' '[:lower:]')\": ["
+                    for i in "${!types[@]}"; do
+                        echo "{ \"${names[i]}\": \"${values[i]}\" },"
+                    done
+                    echo "]}}"
                 else
-                    local types=()
-                    local names=()
-                    local values=()
-                    while read -r line; do
-                        types+=("$(echo "$line" | awk '{print $1}')")
-                        names+=("$(echo "$line" | awk '{print $2}')")
-                        values+=("$(echo "$line" | awk '{print $3}')")
-                    done <<< "$records"
                     local max_type_len=4
                     local max_name_len=4
                     local max_value_len=5
@@ -327,14 +304,74 @@ manage_dns() {
                         [ ${#names[i]} -gt $max_name_len ] && max_name_len=${#names[i]}
                         [ ${#values[i]} -gt $max_value_len ] && max_value_len=${#values[i]}
                     done
-                    echo "DOMAIN: $domain"
+                    echo "DOMAIN: $DOMAIN"
                     echo "| $(pad "Type" $max_type_len) | $(pad "Name" $max_name_len) | $(pad "Value" $max_value_len) |"
                     echo "| $(repeat "-" $max_type_len) | $(repeat "-" $max_name_len) | $(repeat "-" $max_value_len) |"
                     for i in "${!types[@]}"; do
                         echo "| $(pad "${types[i]}" $max_type_len) | $(pad "${names[i]}" $max_name_len) | $(pad "${values[i]}" $max_value_len) |"
                     done
                 fi
-            done
+            fi
+            ;;
+        list-all)
+            log "Listing all domains"
+            local domains
+            domains=$(grep -oP '^[a-zA-Z0-9.-]+ {' "$CORE_FILE" | awk '{print $1}')
+            if $OUTPUT_JSON; then
+                echo "["
+                for domain in $domains; do
+                    local records
+                    records=$(grep -A 100 "$domain {" "$CORE_FILE" | awk '/}/ {exit} {print}' | grep -E "^\s+[A-Z]+")
+                    if [ -n "$records" ]; then
+                        echo "{ \"domain\": \"$domain\", \"records\": {"
+                        local types=()
+                        local names=()
+                        local values=()
+                        while read -r line; do
+                            types+=("$(echo "$line" | awk '{print $1}')")
+                            names+=("$(echo "$line" | awk '{print $2}')")
+                            values+=("$(echo "$line" | awk '{print $3}')")
+                        done <<< "$records"
+                        echo "\"$(echo ${types[@]} | tr '[:upper:]' '[:lower:]')\": ["
+                        for i in "${!types[@]}"; do
+                            echo "{ \"${names[i]}\": \"${values[i]}\" },"
+                        done
+                        echo "]}}"
+                    fi
+                done
+                echo "]"
+            else
+                for domain in $domains; do
+                    local records
+                    records=$(grep -A 100 "$domain {" "$CORE_FILE" | awk '/}/ {exit} {print}' | grep -E "^\s+[A-Z]+")
+                    if [ -z "$records" ]; then
+                        continue
+                    else
+                        local types=()
+                        local names=()
+                        local values=()
+                        while read -r line; do
+                            types+=("$(echo "$line" | awk '{print $1}')")
+                            names+=("$(echo "$line" | awk '{print $2}')")
+                            values+=("$(echo "$line" | awk '{print $3}')")
+                        done <<< "$records"
+                        local max_type_len=4
+                        local max_name_len=4
+                        local max_value_len=5
+                        for i in "${!types[@]}"; do
+                            [ ${#types[i]} -gt $max_type_len ] && max_type_len=${#types[i]}
+                            [ ${#names[i]} -gt $max_name_len ] && max_name_len=${#names[i]}
+                            [ ${#values[i]} -gt $max_value_len ] && max_value_len=${#values[i]}
+                        done
+                        echo "DOMAIN: $domain"
+                        echo "| $(pad "Type" $max_type_len) | $(pad "Name" $max_name_len) | $(pad "Value" $max_value_len) |"
+                        echo "| $(repeat "-" $max_type_len) | $(repeat "-" $max_name_len) | $(repeat "-" $max_value_len) |"
+                        for i in "${!types[@]}"; do
+                            echo "| $(pad "${types[i]}" $max_type_len) | $(pad "${names[i]}" $max_name_len) | $(pad "${values[i]}" $max_value_len) |"
+                        done
+                    fi
+                done
+            fi
             ;;
         remove)
             log "Removing $TYPE record $NAME from $DOMAIN"
