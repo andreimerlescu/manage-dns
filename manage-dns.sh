@@ -12,6 +12,7 @@ USE_SUDO=""
 BACKUP=false
 RESTART=false
 OUTPUT_JSON=false
+USE_JQ=false
 JQ_QUERY="."
 JQ_OPTS=""
 
@@ -140,6 +141,9 @@ validate_ip() {
 
 validate_domain() {
     local domain=$1
+    if [[ "${ACTION,,}" == "list-all" ]]; then
+        return 0
+    fi
     if [[ $domain =~ ^[a-zA-Z0-9.-]+$ ]]; then
         return 0
     else
@@ -178,7 +182,7 @@ while [[ "$1" != "" ]]; do
         --backup) BACKUP=true ;;
         --restart) RESTART=true ;;
         --json) OUTPUT_JSON=true ;;
-        --jq) shift; JQ_QUERY=$1 ;;
+        --jq) shift; USE_JQ=true; JQ_QUERY=$1 ;;
         --jq-opts) shift; JQ_OPTS=$1 ;;
         *) usage ;;
     esac
@@ -334,10 +338,8 @@ manage_dns() {
                 local json_output="["
                 local first=true
                 for domain in $domains; do
-                    if [ "$first" = false ]; then
+                    if ! $first; then
                         json_output+=","
-                    else
-                        first=false
                     fi
                     local records
                     records=$(grep -A 100 "$domain {" "$CORE_FILE" | awk '/}/ {exit} {print}' | grep -E "^\s+[A-Z]+")
@@ -369,12 +371,12 @@ manage_dns() {
                             done
                             domain_json+="],"
                         done
-                        domain_json="${domain_json%,}}"
+                        domain_json="${domain_json%,}}}"
                         json_output+="$domain_json"
                     fi
                 done
                 json_output+="]"
-                if [ -n "$JQ_QUERY" ] && command -v jq &>/dev/null; then
+                if $USE_JQ && [ -n "$JQ_QUERY" ] && command -v jq &>/dev/null; then
                     echo "$json_output" | jq $JQ_OPTS "$JQ_QUERY"
                 else
                     echo "$json_output"
