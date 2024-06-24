@@ -9,8 +9,8 @@ BACKUP_DIR="./backups"
 CORE_FILE="/etc/coredns/Corefile"
 TIMEOUT=30
 USE_SUDO=""
-NO_BACKUP=false
-NO_RESTART=false
+BACKUP=false
+RESTART=false
 
 # Functions
 log() {
@@ -25,7 +25,7 @@ error_log() {
 }
 
 usage() {
-    echo "Usage: $0 --domain DOMAIN --action ACTION [options]"
+    echo "Usage: $0 --domain DOMAIN --action [actions] [options]"
     echo "Actions:"
     echo "  create --type TYPE --name NAME --value VALUE"
     echo "  new --type TYPE --name NAME --value VALUE"
@@ -42,17 +42,17 @@ usage() {
     echo "  --corefile PATH           Path to the Corefile"
     echo "  --logfile PATH            Path to the log file"
     echo "  --lockfile PATH           Path to the lockfile"
+    echo "  --backup                  Enable backup of Corefile"
     echo "  --backups PATH            Path to the backups directory"
-    echo "  --nobackup                Enable no backup creation"
-    echo "  --norestart               Prevent restarting CoreDNS"
+    echo "  --restart                 Prevent restarting CoreDNS"
     echo "Examples:"
+    echo "  $0 --action list-all"
+    echo "  $0 --domain domain.com --action list"
+    echo "  $0 --domain domain.com --action list --type A"
     echo "  $0 --domain domain.com --action create --type A --name www --value 10.10.10.10"
     echo "  $0 --domain domain.com --action new --type CNAME --name git --value github.com"
     echo "  $0 --domain domain.com --action add --type A --name www --value 10.10.10.11"
     echo "  $0 --domain domain.com --action replace --type A --name www --value 10.10.10.12"
-    echo "  $0 --domain domain.com --action list"
-    echo "  $0 --domain domain.com --action list --type A"
-    echo "  $0 --domain domain.com --action list-all"
     echo "  $0 --domain domain.com --action remove --type A --name www"
     echo "  $0 --domain all --action update-forward --forward \"192.168.128.1 10.0.0.1\""
     exit 1
@@ -71,7 +71,7 @@ repeat() {
 }
 
 backup_corefile() {
-    if $NO_BACKUP; then
+    if ! $BACKUP; then
         log "No backup created."
         return
     fi
@@ -100,7 +100,7 @@ remove_lockfile() {
 }
 
 restart_coredns() {
-    if $NO_RESTART; then
+    if ! $RESTART; then
         log "Not restarting CoreDNS service"
         return
     fi
@@ -159,14 +159,14 @@ while [[ "$1" != "" ]]; do
         --lockfile) shift; LOCKFILE=$1 ;;
         --logfile) shift; LOGFILE=$1 ;;
         --backups) shift; BACKUP_DIR=$1 ;;
-        --nobackup) NO_BACKUP=true ;;
-        --norestart) NO_RESTART=true ;;
+        --backup) BACKUP=true ;;
+        --restart) RESTART=true ;;
         *) usage ;;
     esac
     shift
 done
 
-if ! $NO_BACKUP; then
+if $BACKUP; then
     $USE_SUDO mkdir -p "${BACKUP_DIR}"
 fi
 
@@ -175,15 +175,15 @@ if [ "$DEBUG" = true ]; then
     set -x
 fi
 
-# Validate input
-if [ -z "$DOMAIN" ] || [ -z "$ACTION" ]; then
-    usage
-fi
-
 # Ensure the domain and IP are valid if needed
-if ! validate_domain "$DOMAIN"; then
+if [[ "${DOMAIN}" != "all" ]] && ! validate_domain "$DOMAIN"; then
     error_log "Invalid domain: $DOMAIN"
     exit 1
+fi
+
+# Validate input
+if [ -z "$ACTION" ]; then
+    usage
 fi
 
 if [ "$ACTION" != "list" ] && [ "$ACTION" != "list-all" ] && [ "$ACTION" != "remove" ]; then
