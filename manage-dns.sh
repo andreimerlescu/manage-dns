@@ -371,10 +371,11 @@ manage_dns() {
                             done
                             domain_json+="],"
                         done
-                        domain_json="${domain_json%,}}}"
+                        domain_json="${domain_json%,}}},"
                         json_output+="$domain_json"
                     fi
                 done
+                json_output="${json_output%,}"
                 json_output+="]"
                 if $USE_JQ && [ -n "$JQ_QUERY" ] && command -v jq &>/dev/null; then
                     echo "$json_output" | jq $JQ_OPTS "$JQ_QUERY"
