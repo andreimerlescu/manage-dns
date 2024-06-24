@@ -12,6 +12,18 @@ USE_SUDO=""
 BACKUP=false
 RESTART=false
 OUTPUT_JSON=false
+JQ_QUERY="."
+JQ_OPTS=""
+
+# Early parsing of debug flag
+for arg in "$@"; do
+  case $arg in
+    --debug)
+      DEBUG=true
+      set -x
+      ;;
+  esac
+done
 
 # Functions
 log() {
@@ -26,7 +38,7 @@ error_log() {
 }
 
 usage() {
-    echo "Usage: $0 --domain DOMAIN --action ACTION [options]"
+    echo "Usage: $0 --domain DOMAIN --action [actions] [options]"
     echo "Actions:"
     echo "  create --type TYPE --name NAME --value VALUE"
     echo "  new --type TYPE --name NAME --value VALUE"
@@ -43,18 +55,20 @@ usage() {
     echo "  --corefile PATH           Path to the Corefile"
     echo "  --logfile PATH            Path to the log file"
     echo "  --lockfile PATH           Path to the lockfile"
+    echo "  --backup                  Enable backup of Corefile"
     echo "  --backups PATH            Path to the backups directory"
-    echo "  --backup                  Enable backup creation"
-    echo "  --restart                 Enable restart of CoreDNS"
+    echo "  --restart                 Prevent restarting CoreDNS"
     echo "  --json                    Output in JSON format"
+    echo "  --jq QUERY                Process JSON output with jq"
+    echo "  --jq-opts OPTIONS         Options to pass to jq"
     echo "Examples:"
+    echo "  $0 --action list-all"
+    echo "  $0 --domain domain.com --action list"
+    echo "  $0 --domain domain.com --action list --type A"
     echo "  $0 --domain domain.com --action create --type A --name www --value 10.10.10.10"
     echo "  $0 --domain domain.com --action new --type CNAME --name git --value github.com"
     echo "  $0 --domain domain.com --action add --type A --name www --value 10.10.10.11"
     echo "  $0 --domain domain.com --action replace --type A --name www --value 10.10.10.12"
-    echo "  $0 --domain domain.com --action list"
-    echo "  $0 --domain domain.com --action list --type A"
-    echo "  $0 --domain domain.com --action list-all"
     echo "  $0 --domain domain.com --action remove --type A --name www"
     echo "  $0 --domain all --action update-forward --forward \"192.168.128.1 10.0.0.1\""
     exit 1
@@ -154,7 +168,7 @@ while [[ "$1" != "" ]]; do
         --value) shift; VALUE=$1 ;;
         --forward) shift; VALUE=$1 ;;
         --verbose) VERBOSE=true ;;
-        --debug) DEBUG=true ;;
+        --debug) ;; # Handled earlier
         --timeout) shift; TIMEOUT=$1 ;;
         --sudo) USE_SUDO="sudo" ;;
         --corefile) shift; CORE_FILE=$1 ;;
@@ -164,6 +178,8 @@ while [[ "$1" != "" ]]; do
         --backup) BACKUP=true ;;
         --restart) RESTART=true ;;
         --json) OUTPUT_JSON=true ;;
+        --jq) shift; JQ_QUERY=$1 ;;
+        --jq-opts) shift; JQ_OPTS=$1 ;;
         *) usage ;;
     esac
     shift
@@ -173,13 +189,8 @@ if $BACKUP; then
     $USE_SUDO mkdir -p "${BACKUP_DIR}"
 fi
 
-# Debug information
-if [ "$DEBUG" = true ]; then
-    set -x
-fi
-
 # Ensure the domain and IP are valid if needed
-if [[ "$DOMAIN" != "all" ]] && ! validate_domain "$DOMAIN"; then
+if [[ "${DOMAIN}" != "all" ]] && ! validate_domain "$DOMAIN"; then
     error_log "Invalid domain: $DOMAIN"
     exit 1
 fi
@@ -280,22 +291,24 @@ manage_dns() {
             if [ -z "$records" ]; then
                 echo "No records found for domain $DOMAIN."
             else
-                local types=()
-                local names=()
-                local values=()
-                while read -r line; do
-                    types+=("$(echo "$line" | awk '{print $1}')")
-                    names+=("$(echo "$line" | awk '{print $2}')")
-                    values+=("$(echo "$line" | awk '{print $3}')")
-                done <<< "$records"
                 if $OUTPUT_JSON; then
-                    echo "{\"domain\": \"$DOMAIN\", \"records\": {"
-                    echo "\"$(echo ${types[@]} | tr '[:upper:]' '[:lower:]')\": ["
-                    for i in "${!types[@]}"; do
-                        echo "{ \"${names[i]}\": \"${values[i]}\" },"
-                    done
-                    echo "]}}"
+                    local json_records=()
+                    while read -r line; do
+                        local record_type=$(echo "$line" | awk '{print $1}')
+                        local record_name=$(echo "$line" | awk '{print $2}')
+                        local record_value=$(echo "$line" | awk '{print $3}')
+                        json_records+=("{\"$record_name\":\"$record_value\"}")
+                    done <<< "$records"
+                    echo "{\"domain\":\"$DOMAIN\",\"records\":{\"$TYPE\":[${json_records[*]}]}}"
                 else
+                    local types=()
+                    local names=()
+                    local values=()
+                    while read -r line; do
+                        types+=("$(echo "$line" | awk '{print $1}')")
+                        names+=("$(echo "$line" | awk '{print $2}')")
+                        values+=("$(echo "$line" | awk '{print $3}')")
+                    done <<< "$records"
                     local max_type_len=4
                     local max_name_len=4
                     local max_value_len=5
@@ -318,12 +331,19 @@ manage_dns() {
             local domains
             domains=$(grep -oP '^[a-zA-Z0-9.-]+ {' "$CORE_FILE" | awk '{print $1}')
             if $OUTPUT_JSON; then
-                echo "["
+                local json_output="["
+                local first=true
                 for domain in $domains; do
+                    if [ "$first" = false ]; then
+                        json_output+=","
+                    else
+                        first=false
+                    fi
                     local records
                     records=$(grep -A 100 "$domain {" "$CORE_FILE" | awk '/}/ {exit} {print}' | grep -E "^\s+[A-Z]+")
-                    if [ -n "$records" ]; then
-                        echo "{ \"domain\": \"$domain\", \"records\": {"
+                    if [ -z "$records" ]; then
+                        continue
+                    else
                         local types=()
                         local names=()
                         local values=()
@@ -332,14 +352,33 @@ manage_dns() {
                             names+=("$(echo "$line" | awk '{print $2}')")
                             values+=("$(echo "$line" | awk '{print $3}')")
                         done <<< "$records"
-                        echo "\"$(echo ${types[@]} | tr '[:upper:]' '[:lower:]')\": ["
-                        for i in "${!types[@]}"; do
-                            echo "{ \"${names[i]}\": \"${values[i]}\" },"
+                        local domain_json="{\"domain\":\"$domain\",\"records\":{"
+                        local record_types=($(echo "${types[@]}" | tr ' ' '\n' | sort -u | tr '\n' ' '))
+                        for record_type in "${record_types[@]}"; do
+                            domain_json+="\"$record_type\":["
+                            local first_record=true
+                            for i in "${!types[@]}"; do
+                                if [ "${types[i]}" == "$record_type" ]; then
+                                    if [ "$first_record" = false ]; then
+                                        domain_json+=","
+                                    else
+                                        first_record=false
+                                    fi
+                                    domain_json+="{\"${names[i]}\":\"${values[i]}\"}"
+                                fi
+                            done
+                            domain_json+="],"
                         done
-                        echo "]}}"
+                        domain_json="${domain_json%,}}"
+                        json_output+="$domain_json"
                     fi
                 done
-                echo "]"
+                json_output+="]"
+                if [ -n "$JQ_QUERY" ] && command -v jq &>/dev/null; then
+                    echo "$json_output" | jq $JQ_OPTS "$JQ_QUERY"
+                else
+                    echo "$json_output"
+                fi
             else
                 for domain in $domains; do
                     local records
