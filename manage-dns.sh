@@ -39,7 +39,7 @@ log() {
 }
 
 error_log() {
-    echo "$(date): ERROR: $1" >> "$LOGFILE"
+    echo "$(date): ERROR: $1" | tee -a "$LOGFILE"
 }
 
 usage() {

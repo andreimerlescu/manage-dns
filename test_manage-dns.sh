@@ -29,8 +29,6 @@ declare -A history=()
 declare -A outputs=()
 declare -A RESULTS=()
 
-sudo chown -R $(whoami):$(whoami) $TMP_DIR
-
 # Helpers
 function banner_warning() { printf "\033[%d;%dm%s\033[0m\n" 37 43 "${1}"; }
 function banner_info() { printf "\033[%d;%dm%s\033[0m\n" 31 47 "${1}"; }
@@ -272,6 +270,7 @@ run_test() {
         banner_warning "Invalid assert argument 2 passed into run_test"
         exit 1
     fi
+    echo
 }
 
 run_test "Add a new domain example.com with an A record called www pointing to 192.168.128.17..." \
@@ -282,7 +281,6 @@ run_test "Add a new domain example.com with an A record called www pointing to 1
     forward . 8.8.8.8 8.8.4.4
     A www 192.168.128.17
 }"
-echo
 
 run_test "Add a new domain google.com with an A record called andrei pointing to 192.168.128.18..." \
          "./manage-dns.sh --corefile \"$CORE_FILE\" --lockfile \"$LOCK_FILE\" --logfile \"$LOG_FILE\" --domain google.com --action create --type A --name andrei --value 192.168.128.18 --yes" \
@@ -292,85 +290,70 @@ run_test "Add a new domain google.com with an A record called andrei pointing to
     forward . 8.8.8.8 8.8.4.4
     A andrei 192.168.128.18
 }"
-echo
 
 run_test "Remove domain google.com..." \
          "./manage-dns.sh --corefile \"$CORE_FILE\" --lockfile \"$LOCK_FILE\" --logfile \"$LOG_FILE\" --domain google.com --action remove --type A --name andrei --timeout 1 --yes <<< \"y\"" \
          assert_corefile "# Removed A andrei"
-echo
 
 run_test "Update domain example.com and change A record called www to point to 8.8.8.8..." \
          "./manage-dns.sh --corefile \"$CORE_FILE\" --lockfile \"$LOCK_FILE\" --logfile \"$LOG_FILE\" --domain example.com --action replace --type A --name www --value 8.8.8.8 --yes" \
          assert_corefile "A www 8.8.8.8"
-echo
 
 run_test "List all domains..." \
          "./manage-dns.sh --corefile \"$CORE_FILE\" --lockfile \"$LOCK_FILE\" --logfile \"$LOG_FILE\" --action list-all --yes" \
          assert_grep "DOMAIN: example.com"
-echo
 
 run_test "List only google.com (no result expected)..." \
          "./manage-dns.sh --corefile \"$CORE_FILE\" --lockfile \"$LOCK_FILE\" --logfile \"$LOG_FILE\" --domain google.com --action list --yes" \
          assert_ne "No records found for domain google.com."
-echo
 
 run_test "Update forwarders for all domains..." \
          "./manage-dns.sh --corefile \"$CORE_FILE\" --lockfile \"$LOCK_FILE\" --logfile \"$LOG_FILE\" --domain all --action update-forward --forward \"192.168.128.1 10.0.0.1\" --yes" \
          assert_corefile "forward . 192.168.128.1 10.0.0.1"
-echo
 
 run_test "List all domains with JSON output..." \
          "./manage-dns.sh --corefile \"$CORE_FILE\" --lockfile \"$LOCK_FILE\" --logfile \"$LOG_FILE\" --action list-all --yes --json" \
          assert_grep "\"domain\":\"example.com\""
-echo
 
 if command -v jq &>/dev/null; then
     run_test "List all domains with JSON output and jq query..." \
              "./manage-dns.sh --corefile \"$CORE_FILE\" --lockfile \"$LOCK_FILE\" --logfile \"$LOG_FILE\" --action list-all --yes --json --jq '.[] | select(.domain==\"example.com\")'" \
              assert_grep "\"domain\": \"example.com\""
-    echo
 fi
 
 run_test "Remove example.com..." \
          "./manage-dns.sh --corefile \"$CORE_FILE\" --lockfile \"$LOCK_FILE\" --logfile \"$LOG_FILE\" --domain example.com --action remove --type A --name www --timeout 1 --yes <<< \"y\"" \
          assert_corefile ""
-echo
 
 run_test "Remove from domain example.com A record called www..." \
          "./manage-dns.sh --corefile \"$CORE_FILE\" --lockfile \"$LOCK_FILE\" --logfile \"$LOG_FILE\" --domain example.com --action remove --type A --name www --timeout 1 --yes <<< \"y\"" \
          assert_corefile "# Removed A www"
-echo
 
 run_test "List only example.com..." \
          "./manage-dns.sh --corefile \"$CORE_FILE\" --lockfile \"$LOCK_FILE\" --logfile \"$LOG_FILE\" --domain example.com --action list --yes" \
          assert_ne "No records found for domain example.com."
-echo
 
 clean_url=$(echo "$BLOCKLIST_URL" | sed 's/\//-/g')
 run_test "Install blocklist from $BLOCKLIST_URL..." \
          "./manage-dns.sh --corefile \"$CORE_FILE\" --lockfile \"$LOCK_FILE\" --logfile \"$LOG_FILE\" --hosts \"$HOSTS_FILE\" --action install-blocklist --blocklist \"$BLOCKLIST_URL\" --yes" \
          assert_hostsfile "## Blocklist Start - $clean_url ##\n$BLOCKLIST_CONTENT\n## Blocklist End - $clean_url ##"
-echo
 
 run_test "Uninstall blocklist from $BLOCKLIST_URL..." \
          "./manage-dns.sh --corefile \"$CORE_FILE\" --lockfile \"$LOCK_FILE\" --logfile \"$LOG_FILE\" --hosts \"$HOSTS_FILE\" --action uninstall-blocklist --blocklist \"$BLOCKLIST_URL\" --yes" \
          assert_nin_hosts "${RANDOM_DOMAIN}"
-echo
 
 run_test "Activate blocklists in CoreDNS..." \
          "./manage-dns.sh --corefile \"$CORE_FILE\" --lockfile \"$LOCK_FILE\" --logfile \"$LOG_FILE\" --hosts \"$HOSTS_FILE\" --action activate-blocklists --yes" \
          assert_corefile "hosts ${HOSTS_FILE//\//\\/} {
     fallthrough
 }"
-echo
 
 run_test "Deactivate blocklists in CoreDNS..." \
          "./manage-dns.sh --corefile \"$CORE_FILE\" --lockfile \"$LOCK_FILE\" --logfile \"$LOG_FILE\" --hosts \"$HOSTS_FILE\" --action deactivate-blocklists --yes" \
          assert_corefile "errors"
-echo
 
 # Clean up
-# rm -rf "$TMP_DIR"
+rm -rf "$TMP_DIR"
 
 if $SHOW_HISTORY; then
     print_history
