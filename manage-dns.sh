@@ -15,6 +15,10 @@ OUTPUT_JSON=false
 USE_JQ=false
 JQ_QUERY="."
 JQ_OPTS=""
+BLOCKLIST_URL=""
+BLOCKLIST_FILE=""
+HOSTS_FILE="/etc/hosts"
+YES=false
 
 # Early parsing of debug flag
 for arg in "$@"; do
@@ -49,6 +53,10 @@ usage() {
     echo "  list-all"
     echo "  remove --type TYPE --name NAME [--timeout SECONDS]"
     echo "  update-forward --forward FORWARD"
+    echo "  install-blocklist --blocklist URL"
+    echo "  uninstall-blocklist --blocklist URL"
+    echo "  activate-blocklists"
+    echo "  deactivate-blocklists"
     echo "Options:"
     echo "  --verbose                 Enable verbose mode"
     echo "  --debug                   Enable debug mode"
@@ -62,6 +70,8 @@ usage() {
     echo "  --json                    Output in JSON format"
     echo "  --jq QUERY                Process JSON output with jq"
     echo "  --jq-opts OPTIONS         Options to pass to jq"
+    echo "  --hosts                   Path to hosts file"
+    echo "  --yes                     Respond with yes to prompts automatically"
     echo "Examples:"
     echo "  $0 --action list-all"
     echo "  $0 --domain domain.com --action list"
@@ -72,6 +82,11 @@ usage() {
     echo "  $0 --domain domain.com --action replace --type A --name www --value 10.10.10.12"
     echo "  $0 --domain domain.com --action remove --type A --name www"
     echo "  $0 --domain all --action update-forward --forward \"192.168.128.1 10.0.0.1\""
+    echo "  $0 --action install-blocklist --blocklist \"https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/hosts/pro.txt\""
+    echo "  $0 --action install-blocklist --blocklist \"https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/hosts/pro.txt\" --hosts /root/hosts.new"
+    echo "  $0 --action uninstall-blocklist --blocklist \"https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/hosts/pro.txt\""
+    echo "  $0 --action activate-blocklists"
+    echo "  $0 --action deactivate-blocklists"
     exit 1
 }
 
@@ -85,6 +100,21 @@ repeat() {
   local char=$1
   local count=$2
   printf "%${count}s" | tr ' ' "$char"
+}
+
+backup_hostsfile() {
+    if ! $BACKUP; then
+        log "No backup created."
+        return
+    fi
+    local timestamp=$(date -u +"%Y_%m_%d_%H_%M_%S")
+    local backup_file="${BACKUP_DIR}/$(basename "${params[hosts]}")_${timestamp}.bak"
+    if $USE_SUDO cp "${params[hosts]}" "$backup_file"; then
+        log "Backup of ${params[hosts]} created at $backup_file"
+    else
+        error_log "Failed to create backup of ${params[hosts]}"
+        exit 1
+    fi
 }
 
 backup_corefile() {
@@ -152,6 +182,9 @@ validate_domain() {
 }
 
 confirm_action() {
+    if $YES; then
+        return 0
+    fi
     local prompt="$1"
     local timeout=${2:-$TIMEOUT}
     read -t $timeout -p "$prompt (yYtT1 to confirm): " response
@@ -161,6 +194,101 @@ confirm_action() {
         return 1
     fi
 }
+
+download_blocklist() {
+    local url=$1
+    local output=$2
+    log "Downloading blocklist from $url"
+    if ! curl -s -o "$output" "$url"; then
+        error_log "Failed to download blocklist from $url"
+        exit 1
+    fi
+    log "Blocklist downloaded successfully"
+}
+
+install_blocklist() {
+    ! [[ -f "${HOSTS_FILE}" ]] && error "No such file ${HOSTS_FILE}" && return
+    local url=$1
+    [[ -z "${url}" ]] && error "Invalid URL passed to --action install-blocklist --blocklist ${url}" && return
+    local tmp_file="/tmp/blocklist_$(basename "$url").tmp"
+    local clean_url=$(echo "$url" | sed 's/\//-/g')
+    local blocklist_start="## Blocklist Start - $clean_url ##"
+    local blocklist_end="## Blocklist End - $clean_url ##"
+
+    if [[ -f "${url}" ]]; then
+        BLOCKLIST_FILE=$url
+        cat "${BLOCKLIST_FILE}" | $USE_SUDO tee "${tmp_file}" > /dev/null
+    else
+        download_blocklist "$url" "$tmp_file"
+    fi
+
+    log "Installing blocklist from $url"
+    {
+        echo "$blocklist_start"
+        cat "$tmp_file"
+        echo "$blocklist_end"
+    } | $USE_SUDO tee -a "${HOSTS_FILE}" > /dev/null
+    log "Blocklist installed from $url"
+}
+
+uninstall_blocklist() {
+    ! [[ -f "${HOSTS_FILE}" ]] && error "No such file ${HOSTS_FILE}" && return
+    local url=$1
+    [[ -z "${url}" ]] && error "Invalid URL passed to --action uninstall-blocklist --blocklist ${url}" && return
+    local clean_url=$(echo "$url" | sed 's/\//-/g')
+    local blocklist_start="## Blocklist Start - $clean_url ##"
+    local blocklist_end="## Blocklist End - $clean_url ##"
+
+    log "Uninstalling blocklist from $url"
+    $USE_SUDO sed -i "/$blocklist_start/,/$blocklist_end/d" "${HOSTS_FILE}"
+    log "Blocklist uninstalled from $url"
+}
+
+activate_blocklists() {
+    local hf="${HOSTS_FILE//\//\\/}"
+    local blocklist_config=$(printf "hosts %s {\n    fallthrough\n    }\n" "${hf}")
+    if ! $USE_SUDO grep -q "hosts ${hf} {" "$CORE_FILE"; then
+        tmpfile=$(mktemp)
+        $USE_SUDO sed "/^errors/r /dev/stdin" "$CORE_FILE" <<< "$blocklist_config" > "$tmpfile" && $USE_SUDO mv "$tmpfile" "$CORE_FILE"
+        log "Blocklists activated in CoreDNS"
+    else
+        log "Blocklists already activated in CoreDNS"
+    fi
+    restart_coredns
+}
+
+deactivate_blocklists() {
+    local hf="${HOSTS_FILE//\//\\/}"
+    $USE_SUDO sed -i "/hosts $hf {/,/}/d" "$CORE_FILE"
+    log "Blocklists deactivated in CoreDNS"
+    restart_coredns
+}
+
+# Helpers
+function banner_warning() { printf "\033[%d;%dm%s\033[0m\n" 37 43 "${1}"; }
+function banner_info() { printf "\033[%d;%dm%s\033[0m\n" 31 47 "${1}"; }
+function banner_error() { printf "\033[%d;%dm%s\033[0m\n" 37 49 "${1}"; }
+function error(){ tcolt_red "[ERROR] ${1}"; }
+function warning(){ tcolt_orange "[WARNING] ${1}"; }
+function info(){ tcolt_yellow "[INFO] ${1}"; }
+function debug(){ [[ -z "${DEBUG:-}" ]] && tcolt_pink "[DEBUG] ${1}"; }
+function success(){ tcolt_green "[SUCCESS] ${1}"; }
+function rerror(){ replace "$(tcolt_red "[ERROR] ${1}";)"; }
+function rwarning(){ replace "$(tcolt_orange "[WARNING] ${1}";)"; }
+function rinfo(){ replace "$(tcolt_yellow "[INFO] ${1}";)"; }
+function rdebug(){ [[ -z "${DEBUG:-}" ]] && replace "$(tcolt_pink "[DEBUG] ${1}";)"; }
+function rsuccess(){ replace "$(tcolt_green "[SUCCESS] ${1}";)"; }
+function tcolt_red() { echo -e "\033[0;31m${1}\033[0m"; }
+function tcolt_blue() { echo -e "\033[0;34m${1}\033[0m"; }
+function tcolt_green() { echo -e "\033[0;32m${1}\033[0m"; }
+function tcolt_purple() { echo -e "\033[0;35m${1}\033[0m"; }
+function tcolt_gold() { echo -e "\033[0;33m${1}\033[0m"; }
+function tcolt_silver() { echo -e "\033[0;37m${1}\033[0m"; }
+function tcolt_yellow() { echo -e "\033[1;33m${1}\033[0m"; }
+function tcolt_orange() { echo -e "\033[0;33m${1}\033[0m"; }
+function tcolt_pink() { echo -e "\033[1;36m${1}\033[0m"; }
+function tcolt_magenta() { echo -e "\033[0;35m${1}\033[0m"; }
+function safe_exit() { local msg="${1:-UnexpectedError}"; echo "${msg}"; exit 1; }
 
 # Parse flags
 while [[ "$1" != "" ]]; do
@@ -184,6 +312,9 @@ while [[ "$1" != "" ]]; do
         --json) OUTPUT_JSON=true ;;
         --jq) shift; USE_JQ=true; JQ_QUERY=$1 ;;
         --jq-opts) shift; JQ_OPTS=$1 ;;
+        --blocklist) shift; BLOCKLIST_URL=$1 ;;
+        --hosts) shift; HOSTS_FILE=$1 ;;
+        --yes) YES=true ;;
         *) usage ;;
     esac
     shift
@@ -194,20 +325,26 @@ if $BACKUP; then
 fi
 
 # Ensure the domain and IP are valid if needed
-if [[ "${DOMAIN}" != "all" ]] && ! validate_domain "$DOMAIN"; then
-    error_log "Invalid domain: $DOMAIN"
-    exit 1
+if [ "$ACTION" != "install-blocklist" ] && \
+   [ "$ACTION" != "uninstall-blocklist" ] && \
+   [ "$ACTION" != "activate-blocklists" ] && \
+   [ "$ACTION" != "deactivate-blocklists" ]; then
+    if [[ "${DOMAIN}" != "all" ]] && ! validate_domain "$DOMAIN"; then
+        banner_error "Invalid domain: $DOMAIN"
+        exit 1
+    fi
 fi
 
 # Validate input
 if [ -z "$ACTION" ]; then
+    banner_error "No --action defined"
     usage
 fi
 
 if [ "$ACTION" != "list" ] && [ "$ACTION" != "list-all" ] && [ "$ACTION" != "remove" ]; then
     if [ "$TYPE" == "A" ] || [ "$TYPE" == "AAAA" ]; then
         if ! validate_ip "$VALUE"; then
-            error_log "Invalid IP address: $VALUE"
+            banner_error "Invalid IP address: $VALUE"
             exit 1
         fi
     fi
@@ -226,9 +363,13 @@ manage_dns() {
     fi
 
     case $ACTION in
-        create | new | add | replace | remove)
+        create | new | add | replace | remove | activate-blocklists | deactivate-blocklists)
             # Backup Corefile
             backup_corefile
+            ;;
+        install-blocklist | uninstall-blocklist)
+            # Backup hosts file
+            backup_hostsfile
             ;;
     esac
 
@@ -255,7 +396,7 @@ manage_dns() {
             # Add the new DNS entry
             if grep -q "$DOMAIN {" "$CORE_FILE"; then
                 # Domain exists, add new record
-                if grep -q "$DOMAIN {/,/}/ s/    $TYPE $NAME $VALUE" "$CORE_FILE"; then
+                if grep -q "$DOMAIN {/,/}/ s/    $TYPE $NAME" "$CORE_FILE"; then
                     log "Record already exists, skipping add"
                 else
                     $USE_SUDO sed -i "/$DOMAIN {/,/}/ s/}/    $TYPE $NAME $VALUE\n}/" "$CORE_FILE"
@@ -450,6 +591,22 @@ manage_dns() {
                 fi
             fi
             ;;
+        install-blocklist)
+            log "Installing blocklist from $BLOCKLIST_URL"
+            install_blocklist "$BLOCKLIST_URL"
+            ;;
+        uninstall-blocklist)
+            log "Uninstalling blocklist from $BLOCKLIST_URL"
+            uninstall_blocklist "$BLOCKLIST_URL"
+            ;;
+        activate-blocklists)
+            log "Activating blocklists in CoreDNS"
+            activate_blocklists
+            ;;
+        deactivate-blocklists)
+            log "Deactivating blocklists in CoreDNS"
+            deactivate_blocklists
+            ;;
         *)
             usage
             ;;
@@ -471,3 +628,5 @@ remove_lockfile
 
 # Remove trap
 trap - INT TERM EXIT
+
+exit 0
